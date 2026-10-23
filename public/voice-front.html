@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VoiceBridge — 语音 × Claude × 摄像头</title>
+<style>
+  :root {
+    --bg: #f4f6fb; --card: #ffffff; --ink: #1e293b; --sub: #64748b;
+    --line: #e5e9f2; --accent: #2563eb; --accent-soft: #eff6ff;
+    --green: #16a34a; --amber: #d97706; --red: #dc2626;
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, "Microsoft YaHei", sans-serif; background: var(--bg); color: var(--ink); }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 24px 16px 40px; }
+  header { display:flex; align-items:center; gap:10px; margin-bottom:16px; }
+  .logo { width:34px; height:34px; border-radius:10px; background:linear-gradient(135deg,#2563eb,#7c3aed);
+          display:flex; align-items:center; justify-content:center; color:#fff; font-size:18px; }
+  h1 { font-size:20px; margin:0; } .sub { font-size:12px; color:var(--sub); }
+  .chips { display:flex; gap:6px; margin-left:auto; flex-wrap:wrap; }
+  .chip { font-size:12px; padding:3px 10px; border-radius:999px; background:#fff; border:1px solid var(--line); color:var(--sub); }
+  .chip.ok { background:#ecfdf5; border-color:#bbf7d0; color:#15803d; }
+  .chip.warn { background:#fffbeb; border-color:#fde68a; color:#b45309; }
+  .chip.bad { background:#fef2f2; border-color:#fecaca; color:#b91c1c; }
+  .grid { display:grid; grid-template-columns: 1fr 260px; gap:14px; align-items:stretch; }
+  @media (max-width:760px){ .grid{ grid-template-columns:1fr; } }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:16px; box-shadow:0 1px 3px rgba(16,24,40,.06); }
+  .cam-card { padding:10px; display:flex; flex-direction:column; gap:8px; }
+  .cam-card img { width:100%; border-radius:10px; background:#eef2f7; aspect-ratio:16/9; object-fit:cover; }
+  .cam-meta { font-size:12px; color:var(--sub); display:flex; justify-content:space-between; }
+  .btnrow { display:flex; gap:8px; margin:14px 0; flex-wrap:wrap; }
+  button { border:0; border-radius:10px; padding:10px 18px; font-size:14px; cursor:pointer; font-weight:500; }
+  button:disabled { opacity:.45; cursor:default; }
+  .btn-main { background:var(--accent); color:#fff; }
+  .btn-main.active { background:var(--red); }
+  .btn-danger { background:#fee2e2; color:#b91c1c; }
+  .btn-ghost { background:#fff; border:1px solid var(--line); color:var(--ink); }
+  #log { height: 340px; overflow-y:auto; padding:14px; display:flex; flex-direction:column; gap:8px; }
+  .bubble { max-width:78%; padding:8px 12px; border-radius:14px; font-size:14px; line-height:1.55; white-space:pre-wrap; word-break:break-word; }
+  .bubble.user { align-self:flex-end; background:var(--accent); color:#fff; border-bottom-right-radius:4px; }
+  .bubble.ai { align-self:flex-start; background:#f1f5f9; border-bottom-left-radius:4px; }
+  .bubble.final.ai { background:var(--accent-soft); }
+  .bubble.sys { align-self:center; background:transparent; color:var(--sub); font-size:12px; }
+  .bubble.prog { align-self:flex-start; background:#fffbeb; color:#92400e; font-size:13px; border:1px dashed #fde68a; }
+  .inputbar { display:flex; gap:8px; margin-top:14px; }
+  .inputbar input { flex:1; border:1px solid var(--line); border-radius:12px; padding:11px 14px; font-size:14px; outline:none; }
+  .inputbar input:focus { border-color:var(--accent); }
+  .inputbar button { background:var(--accent); color:#fff; }
+  .hint { font-size:12px; color:var(--sub); margin-top:10px; }
+  /* settings modal */
+  .modal-bg { position:fixed; inset:0; background:rgba(15,23,42,.45); display:none; align-items:flex-start; justify-content:center; z-index:50; padding:40px 12px; }
+  .modal { background:#fff; border-radius:16px; width:560px; max-width:100%; padding:22px; }
+  .modal h2 { margin:0 0 14px; font-size:17px; }
+  .frow { display:grid; grid-template-columns:130px 1fr; gap:10px; align-items:center; margin-bottom:10px; font-size:13px; }
+  .frow input, .frow select { border:1px solid var(--line); border-radius:8px; padding:9px 10px; font-size:13px; width:100%; outline:none; background:#fff; color:var(--ink); }
+  .frow input:focus, .frow select:focus { border-color:var(--accent); }
+  .mrow { display:flex; gap:8px; align-items:center; margin-top:6px; }
+  .msg { font-size:12px; color:var(--green); }
+  .msg.err { color:var(--red); }
+  .dot { width:8px; height:8px; border-radius:50%; background:var(--green); display:inline-block; margin-right:4px; animation:pulse 1.6s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="logo">🎙</div>
+    <div>
+      <h1>VoiceBridge</h1>
+      <div class="sub">Qwen 实时语音 × Claude Code × 摄像头</div>
+    </div>
+    <div class="chips">
+      <span class="chip" id="p-hub">hub —</span>
+      <span class="chip" id="p-qwen">qwen —</span>
+      <span class="chip" id="p-claude">claude 空闲</span>
+      <span class="chip" id="p-frame">frames 0/0</span>
+    </div>
+  </header>
+
+  <div class="grid">
+    <div class="card" id="log"></div>
+    <div class="card cam-card">
+      <img id="cam" alt="camera">
+      <div class="cam-meta"><span>📹 摄像头画面</span><span id="frame-age"></span></div>
+    </div>
+  </div>
+
+  <div class="btnrow">
+    <button class="btn-main" id="btn">🎙 开始对话</button>
+    <button class="btn-danger" id="btnStop" disabled>■ 停止 Claude</button>
+    <button class="btn-ghost" id="btnCfg">⚙ 模型设置</button>
+  </div>
+
+  <div class="inputbar">
+    <input id="txt" type="text" placeholder="文字兜底:直接发给 Qwen;/c 开头直接给 Claude;输入 停 取消任务">
+    <button id="btnSend">发送</button>
+  </div>
+  <div class="hint">💡 把物体举到摄像头前直接提问;AI 说话时随时开口即可打断;回声明显请戴耳机。</div>
+</div>
+
+<div class="modal-bg" id="cfgModal">
+  <div class="modal">
+    <h2>Qwen Realtime 配置</h2>
+    <div class="frow"><label>API Key</label><input id="c-key" type="password" placeholder="sk-...(留空保持不变)"></div>
+    <div class="frow"><label>Workspace ID</label><input id="c-wsid" type="text" placeholder="业务空间 ID(留空保持不变)"></div>
+    <div class="frow"><label>模型</label>
+      <select id="c-model">
+        <option value="qwen3.8-omni-flash-realtime">qwen3.8-omni-flash-realtime(推荐)</option>
+        <option value="qwen3.5-omni-plus-realtime">qwen3.5-omni-plus-realtime</option>
+      </select></div>
+    <div class="frow"><label>音色</label>
+      <select id="c-voice">
+        <option value="Tina">Tina(默认)</option>
+        <option value="Ethan">Ethan</option>
+        <option value="longanlingxin">龙安灵心</option>
+        <option value="loongbella">LoongBella</option>
+      </select></div>
+    <div class="frow"><label>地域</label>
+      <select id="c-region">
+        <option value="cn-beijing">北京</option>
+        <option value="ap-southeast-1">新加坡</option>
+      </select></div>
+    <div class="frow"><label>帧注入策略</label>
+      <select id="c-frame">
+        <option value="active">active(语音活动时,省 token)</option>
+        <option value="always">always(持续注入)</option>
+        <option value="off">off(不注入)</option>
+      </select></div>
+    <div class="frow"><label>帧间隔(ms)</label><input id="c-interval" type="number" min="1000" step="500" value="4000"></div>
+    <div class="mrow">
+      <button class="btn-main" id="btnSave">保存并生效</button>
+      <button class="btn-ghost" id="btnTest">测试连接</button>
+      <button class="btn-ghost" id="btnCloseCfg">关闭</button>
+      <span class="msg" id="cfgMsg"></span>
+    </div>
+    <div class="hint">Key 保存在本机 .env,页面仅显示掩码;模型/音色列表见百炼控制台。</div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const logEl = $('log');
+let ws = null, micStream = null, audioCtx = null, workletNode = null;
+let playCtx = null, playAt = 0, running = false, claudeBusy = false, qwenPillTouched = false;
+let lastFrameTs = 0;
+
+function log(cls, text) {
+  const d = document.createElement('div');
+  d.className = 'bubble ' + cls; d.textContent = text;
+  logEl.appendChild(d); logEl.scrollTop = logEl.scrollHeight;
+  while (logEl.children.length > 120) logEl.firstChild.remove();
+}
+function pill(id, text, cls) { const e = $(id); e.textContent = text; e.className = 'chip ' + (cls || ''); }
+
+// ---------- playback (AudioContext must resume inside a user gesture) ----------
+function ensurePlayCtx() {
+  if (!playCtx) playCtx = new AudioContext({ sampleRate: 24000 });
+  if (playCtx.state === 'suspended') playCtx.resume();
+}
+function playPcm(b64) {
+  ensurePlayCtx();
+  const bin = atob(b64), buf = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+  const pcm = new Int16Array(buf.buffer);
+  const audioBuf = playCtx.createBuffer(1, pcm.length, 24000);
+  const ch = audioBuf.getChannelData(0);
+  for (let i = 0; i < pcm.length; i++) ch[i] = pcm[i] / 32768;
+  const src = playCtx.createBufferSource();
+  src.buffer = audioBuf; src.connect(playCtx.destination);
+  const at = Math.max(playCtx.currentTime + 0.03, playAt);
+  src.start(at); playAt = at + audioBuf.duration;
+}
+function stopPlayback() { playAt = 0; if (playCtx) { playCtx.close(); playCtx = null; } }
+
+// ---------- mic ----------
+async function startMic() {
+  micStream = await navigator.mediaDevices.getUserMedia({
+    audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1, sampleRate: 16000 }
+  });
+  audioCtx = new AudioContext({ sampleRate: 16000 });
+  const src = audioCtx.createMediaStreamSource(micStream);
+  const code = `class P extends AudioWorkletProcessor {
+    process(inputs){ const ch=inputs[0][0]; if(ch){ const i16=new Int16Array(ch.length);
+      for(let i=0;i<ch.length;i++){ const s=Math.max(-1,Math.min(1,ch[i])); i16[i]=s<0?s*32768:s*32767; }
+      this.port.postMessage(i16.buffer,[i16.buffer]); } return true; } }
+    registerProcessor('pcm16', P);`;
+  const url = URL.createObjectURL(new Blob([code], { type: 'application/javascript' }));
+  await audioCtx.audioWorklet.addModule(url);
+  workletNode = new AudioWorkletNode(audioCtx, 'pcm16');
+  workletNode.port.onmessage = (e) => {
+    if (ws && ws.readyState === 1 && running) ws.send(e.data);
+  };
+  src.connect(workletNode);
+  const mute = audioCtx.createGain(); mute.gain.value = 0;
+  workletNode.connect(mute); mute.connect(audioCtx.destination);
+}
+
+// ---------- ws ----------
+function connect() {
+  ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = () => pill('p-hub', 'hub ✓', 'ok');
+  ws.onclose = () => { pill('p-hub', 'hub 断开,3s 重连', 'bad'); setTimeout(connect, 3000); };
+  ws.onmessage = (ev) => {
+    if (ev.data instanceof ArrayBuffer) return;
+    const m = JSON.parse(ev.data);
+    switch (m.t) {
+      case 'qwen_state':
+        qwenPillTouched = true;
+        pill('p-qwen', 'qwen ' + (m.state === 'ready' ? '✓' : m.state),
+             m.state === 'ready' ? 'ok' : (m.state === 'error' ? 'bad' : 'warn'));
+        if (m.state === 'error' && m.detail) log('sys', '[qwen] ' + m.detail);
+        break;
+      case 'audio': if (running) playPcm(m.d); break;
+      case 'stop_audio': stopPlayback(); break;
+      case 'transcript':
+        if (m.final) {
+          if (m.who === 'user') log('user', m.text);
+          else { log('ai final', m.text); }
+        }
+        break;
+      case 'progress': log('prog', '⏳ ' + m.line); break;
+      case 'agent_done': log('ai final', '✅ ' + m.summary); break;
+      case 'busy':
+        claudeBusy = m.busy;
+        pill('p-claude', m.busy ? (new Date()).toLocaleTimeString().slice(0,5) + ' 执行中' : 'claude 空闲', m.busy ? 'warn' : 'ok');
+        $('btnStop').disabled = !m.busy;
+        break;
+      case 'frame':
+        $('cam').src = m.thumb;
+        lastFrameTs = Date.now();
+        break;
+      case 'error': log('sys', '[错误] ' + m.message); break;
+    }
+  };
+}
+
+// ---------- controls ----------
+$('btn').onclick = async () => {
+  if (!running) {
+    ensurePlayCtx();               // create/resume inside the click gesture
+    try {
+      await startMic();
+      running = true;
+      $('btn').textContent = '■ 结束对话'; $('btn').classList.add('active');
+      log('sys', '🎤 麦克风已开启,开始说话吧');
+    } catch (e) { log('sys', '麦克风失败: ' + e.message); }
+  } else {
+    running = false;
+    micStream?.getTracks().forEach(t => t.stop());
+    audioCtx?.close(); audioCtx = null;
+    stopPlayback();
+    $('btn').textContent = '🎙 开始对话'; $('btn').classList.remove('active');
+    log('sys', '对话已结束');
+  }
+};
+$('btnStop').onclick = () => ws.send(JSON.stringify({ t: 'text', text: '停' }));
+$('btnSend').onclick = sendText;
+$('txt').addEventListener('keydown', e => { if (e.key === 'Enter') sendText(); });
+function sendText() {
+  const v = $('txt').value.trim(); if (!v) return;
+  ws.send(JSON.stringify({ t: 'text', text: v }));
+  log('user', v); $('txt').value = '';
+}
+
+// ---------- settings ----------
+$('btnCfg').onclick = async () => {
+  $('cfgModal').style.display = 'flex';
+  try {
+    const c = await (await fetch('/api/config')).json();
+    $('c-key').placeholder = c.hasApiKey ? ('已保存 ' + c.apiKeyMasked + '(留空保持不变)') : 'sk-...';
+    $('c-wsid').placeholder = c.hasWorkspaceId ? ('已保存 ' + c.workspaceIdMasked + '(留空保持不变)') : '业务空间 ID';
+    $('c-model').value = c.model; $('c-voice').value = c.voice;
+    $('c-region').value = c.region; $('c-frame').value = c.frameMode;
+    $('c-interval').value = c.frameIntervalMs;
+  } catch (e) { cfgMsg('读取失败: ' + e.message, true); }
+};
+$('btnCloseCfg').onclick = () => $('cfgModal').style.display = 'none';
+$('cfgModal').onclick = (e) => { if (e.target === $('cfgModal')) $('cfgModal').style.display = 'none'; };
+function cfgMsg(text, err) { const e = $('cfgMsg'); e.textContent = text; e.className = 'msg' + (err ? ' err' : ''); }
+$('btnSave').onclick = async () => {
+  cfgMsg('保存中...');
+  const body = {
+    model: $('c-model').value, voice: $('c-voice').value, region: $('c-region').value,
+    frameMode: $('c-frame').value, frameIntervalMs: Number($('c-interval').value),
+  };
+  if ($('c-key').value.trim()) body.apiKey = $('c-key').value.trim();
+  if ($('c-wsid').value.trim()) body.workspaceId = $('c-wsid').value.trim();
+  try {
+    const r = await (await fetch('/api/config', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) })).json();
+    if (r.ok) { cfgMsg('已保存并生效'); $('c-key').value = ''; $('c-wsid').value = ''; }
+    else cfgMsg('失败: ' + r.error, true);
+  } catch (e) { cfgMsg('失败: ' + e.message, true); }
+};
+$('btnTest').onclick = async () => {
+  cfgMsg('测试连接中(最多 25s)...');
+  try {
+    const r = await (await fetch('/api/test-qwen', { method: 'POST' })).json();
+    cfgMsg((r.ok ? '✓ ' : '✗ ') + r.detail, !r.ok);
+  } catch (e) { cfgMsg('失败: ' + e.message, true); }
+};
+
+// frame age display
+setInterval(() => {
+  const age = lastFrameTs ? Math.round((Date.now() - lastFrameTs) / 1000) : null;
+  $('frame-age').textContent = age === null ? '无帧' : (age + 's 前');
+}, 1000);
+
+// status refresh
+setInterval(async () => {
+  try {
+    const s = await (await fetch('/api/status')).json();
+    pill('p-frame', `frames ${s.framesReceived}/${s.framesInjected}`, s.framesReceived ? 'ok' : '');
+    if (!s.qwenConfigured) pill('p-qwen', 'qwen 未配置 key', 'bad');
+    else if (!qwenPillTouched) pill('p-qwen', s.qwenConnected ? 'qwen ✓' : 'qwen 未连接', s.qwenConnected ? 'ok' : 'warn');
+  } catch {}
+}, 3000);
+
+connect();
+log('sys', '就绪。点击「开始对话」并允许麦克风;把物体举到摄像头前即可提问。');
+</script>
+</body>
+</html>

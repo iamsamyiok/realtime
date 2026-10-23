@@ -1,0 +1,29 @@
+{
+  "name": "voice-hub",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Voice gateway bridging Qwen-Omni-Realtime (speech+vision) with Claude Code (Agent SDK) and the mcp-webcam camera pipeline",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/hub.js",
+    "dev": "tsc --watch",
+    "poc:qwen": "node test/poc-qwen.mjs",
+    "test:claude": "node test/test-claude.mjs"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.309",
+    "@modelcontextprotocol/sdk": "^1.13.2",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2",
+    "sharp": "^0.33.5",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.10.0",
+    "@types/ws": "^8.5.13",
+    "typescript": "^5.6.2"
+  }
+}
