@@ -380,6 +380,10 @@ export class QwenSession {
 
       case "error":
         console.error("[qwen] error event:", JSON.stringify(ev.error ?? ev).slice(0, 300));
+        if (/already has an active response/i.test(JSON.stringify(ev.error ?? ev))) {
+          setTimeout(() => this.requestResponse(), 1500);
+          break;
+        }
         if (/Unknown function call id|rejected function_call_output/i.test(JSON.stringify(ev.error ?? ev))) {
           // Stale call_id from a previous session generation - already handled
           // by the text-injection fallback; never treat as fatal.

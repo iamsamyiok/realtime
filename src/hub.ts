@@ -126,14 +126,18 @@ function speakable(s: string): string {
     .trim()
     .slice(0, 220);
 }
+let lastInjectionAt = 0;
 function speak(text: string, dedupe = true): void {
   const spoken = speakable(text);
   const n = normForDedup(spoken);
   if (dedupe && injectedNorms.includes(n)) return;
   injectedNorms.push(n);
   if (injectedNorms.length > 8) injectedNorms.shift();
+  lastInjectionAt = Date.now();
   qwen.speechText(spoken);
 }
+
+let supersededTask: string | null = null;
 
 const claude = new ClaudeWorker({
   onProgress: (line) => {
@@ -160,7 +164,15 @@ const claude = new ClaudeWorker({
 const qwen = new QwenSession({
   onAudio: (b64) => broadcast({ t: "audio", d: b64 }),
   onStopAudio: () => broadcast({ t: "stop_audio" }),
-  onTranscript: (who, text, final) => broadcast({ t: "transcript", who, text, final }),
+  onTranscript: (who, text, final) => {
+    broadcast({ t: "transcript", who, text, final });
+    // Deterministic stop bypass: never route cancellation through the model.
+    if (who === "user" && final && claude.isBusy &&
+        /^(停|停下|停止|取消|不要了|不用了|算了|中断|别做了|别查了|终止|关掉)/.test(text.trim())) {
+      claude.cancelAll("用户语音取消");
+      speak("已停止,当前任务取消");
+    }
+  },
   onState: (state, detail) => {
     console.log(`[qwen] state=${state} ${detail ?? ""}`);
     if (state === "ready") qwenStartedAt = Date.now();
@@ -179,11 +191,27 @@ const qwen = new QwenSession({
       const wasBusy = claude.isBusy;
       void claude
         .send(task, latest?.base64)
+        .then((summary) => {
+          // Auto-continue a task that was paused by a newer delegation
+          if (supersededTask) {
+            const t = supersededTask;
+            supersededTask = null;
+            qwen.speechText("[自动续接] 新任务已完成,现在继续之前被暂停的任务");
+            void claude
+              .send(`[自动续接] 之前你在执行任务「${t}」时被新请求打断,会话记忆里应有进度。请继续完成该任务。`)
+              .catch((e) => qwen.speechText(`[续接失败] ${(e as Error).message.slice(0, 150)}`));
+          }
+        })
         .catch((e) => {
           qwen.speechText(`[任务失败] ${(e as Error).message.slice(0, 200)}`);
           qwen.requestResponse();
         });
-      if (wasBusy) return { status: "queued", note: "当前有任务在跑,这个已排入队列,完成后自动执行" };
+      if (wasBusy) {
+        if (parsed.priority === "queue") {
+          return { status: "queued", note: "已排入队列,前面的任务完成后自动执行" };
+        }
+        return { status: "superseded", note: "已暂停原任务,先执行新任务;原任务会在新任务完成后自动继续" };
+      }
       return { status: "accepted", note: "任务已交给 Claude 执行,进度将陆续播报" };
     }
     if (name === "look_closely") {
@@ -380,6 +408,14 @@ setInterval(() => {
   if (!qwen.connected && cfg.frameMode === "active") return;
   void captureOnce();
 }, cfg.frameIntervalMs);
+
+// Busy keepalive: DashScope closes sessions with no response for 300s.
+// While Claude runs long tasks, inject a status line before that happens.
+setInterval(() => {
+  if (claude.isBusy && qwen.connected && Date.now() - lastInjectionAt > 200_000) {
+    speak("[状态] Claude 仍在执行中,请稍候");
+  }
+}, 60_000);
 
 // Qwen session recycler: realtime billing re-processes the whole context
 // every turn, so a session that lives for hours gets expensive. When the

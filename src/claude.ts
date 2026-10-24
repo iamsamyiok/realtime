@@ -69,14 +69,16 @@ const SAFE_BASH = /^(npm (test|run|install|ci)|npx |node |python |pip |idf\.py|l
 const ALLOWED_TOOLS = new Set(["Read", "Glob", "Grep", "WebFetch", "WebSearch", "TodoWrite", "mcp__smart-search__web_search"]);
 
 type ActiveTask = {
+  label: string;
   resolve: (s: string) => void;
   reject: (e: Error) => void;
   cancelled: boolean;
   timedOut: boolean;
+  superseded: boolean;
   timeout: NodeJS.Timeout | null;
 };
 
-type QueuedTask = { msg: SDKUserMessage; resolve: (s: string) => void; reject: (e: Error) => void };
+type QueuedTask = { msg: SDKUserMessage; label: string; resolve: (s: string) => void; reject: (e: Error) => void };
 
 /**
  * A long-lived Claude Code session driven through the Agent SDK's
@@ -96,6 +98,8 @@ export class ClaudeWorker {
   private active: ActiveTask | null = null;
   private pending: { resolve: (s: string) => void; reject: (e: Error) => void } | null = null;
   private lastProgressAt = 0;
+  /** description of a task that was superseded and should auto-continue */
+  requeueAfter: string | null = null;
 
   constructor(private cb: ClaudeCallbacks) {}
 
@@ -191,6 +195,24 @@ export class ClaudeWorker {
             this.finishActive(summary);
           }
         }
+        // Stream ended (interrupt can close it): drop the handle so the next
+        // task starts a fresh query — resume brings the history back.
+        this.queryHandle = null;
+        if (this.active || this.pending) {
+          const task = this.active;
+          this.active = null;
+          if (this.pending) {
+            this.pending.resolve(task?.cancelled ? "(已取消)" : "(会话已结束)");
+            this.pending = null;
+          }
+          if (task) {
+            if (task.timeout) clearTimeout(task.timeout);
+            if (task.cancelled) this.cb.onCancelled("用户取消");
+            else if (task.timedOut) this.cb.onCancelled("任务超时,已自动停止");
+            else this.cb.onDone(task.label + " — 会话流已结束,未完成");
+          }
+          this.busyGuard();
+        }
       } catch (e) {
         console.error("[claude] stream error:", (e as Error).message);
         this.cb.onError((e as Error).message);
@@ -209,7 +231,9 @@ export class ClaudeWorker {
     }
     if (task) {
       if (task.timeout) clearTimeout(task.timeout);
-      if (task.cancelled) this.cb.onCancelled("用户取消");
+      if (task.superseded) {
+        /* superseded: hub already announced the switch; no speech here */
+      } else if (task.cancelled) this.cb.onCancelled("用户取消");
       else if (task.timedOut) this.cb.onCancelled("任务超时,已自动停止");
       else this.cb.onDone(summary || "(任务完成,无文本输出)");
     }
@@ -232,7 +256,7 @@ export class ClaudeWorker {
     if (this.waiting.length > 0) {
       const next = this.waiting.shift()!;
       this.cb.onBusy(true);
-      this.activate(next.msg, next.resolve, next.reject);
+      this.activate(next.msg, next.label, next.resolve, next.reject);
     } else {
       this.cb.onBusy(false);
     }
@@ -277,17 +301,31 @@ export class ClaudeWorker {
         return Promise.reject(new Error("任务队列已满(3 个),请等当前任务完成"));
       }
       console.log(`[claude] queued task (${this.waiting.length + 1} waiting)`);
-      return new Promise<string>((resolve, reject) => this.waiting.push({ msg, resolve, reject }));
+      return new Promise<string>((resolve, reject) => this.waiting.push({ msg, resolve, reject, label: task }));
     }
 
-    return new Promise<string>((resolve, reject) => this.activate(msg, resolve, reject));
+    return new Promise<string>((resolve, reject) => this.activate(msg, task, resolve, reject));
   }
 
-  private activate(msg: SDKUserMessage, resolve: (s: string) => void, reject: (e: Error) => void): void {
+  /** Supersede the running task with a new one: cancel old, start new, and
+   *  return the old task's description so the caller can auto-continue it
+   *  afterwards (the persistent session remembers where it left off). */
+  supersede(task: string, imageBase64?: string): string | null {
+    const old = this.active;
+    if (old) old.superseded = true;
+    for (const t of this.waiting) t.reject(new Error("被新任务取代"));
+    this.waiting = [];
+    this.interrupt("被新任务取代");
+    void this.send(task, imageBase64);
+    return old ? old.label : null;
+  }
+
+  private activate(msg: SDKUserMessage, label: string, resolve: (s: string) => void, reject: (e: Error) => void): void {
     this.cb.onBusy(true);
     this.lastProgressAt = 0;
     const task: ActiveTask = {
-      resolve, reject, cancelled: false, timedOut: false,
+      label,
+      resolve, reject, cancelled: false, timedOut: false, superseded: false,
       timeout: cfg.taskTimeoutMs > 0
         ? setTimeout(() => {
             if (this.active) {
@@ -304,7 +342,14 @@ export class ClaudeWorker {
     this.queueWake?.();
   }
 
-  /** User said "停" or a timeout fired: interrupt and mark cancelled. */
+  /** User said "停" or a timeout fired: interrupt and mark cancelled.
+   *  Also drops the waiting queue — "stop" means everything stops. */
+  cancelAll(reason = "用户取消"): void {
+    for (const t of this.waiting) t.reject(new Error("已取消"));
+    this.waiting = [];
+    this.interrupt(reason);
+  }
+
   interrupt(reason = "用户取消"): void {
     if (this.queryHandle && this.active) {
       console.log("[claude] interrupt requested:", reason);
