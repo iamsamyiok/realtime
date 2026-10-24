@@ -4,7 +4,9 @@
   "private": true,
   "type": "module",
   "description": "Realtime — voice+vision gateway bridging Qwen-Omni-Realtime with Claude Code (Agent SDK) and the mcp-webcam camera pipeline",
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "build": "tsc",
     "start": "node dist/hub.js",
@@ -18,7 +20,8 @@
     "dotenv": "^16.4.5",
     "express": "^4.21.2",
     "sharp": "^0.33.5",
-    "ws": "^8.18.0"
+    "ws": "^8.18.0",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@types/express": "^4.17.21",

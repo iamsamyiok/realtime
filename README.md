@@ -69,6 +69,9 @@ if (voiceHub && image) {
 - **打断**:Qwen `semantic_vad` 检测到说话即 `response.cancel` 并清空播放(官方推荐模式)
 - **视觉**:帧经 hub 分轨 —— Qwen 收 720P JPEG(官方限单张 base64 后 ≤256KB,建议 1fps);
   Claude 收原生分辨率作为消息图像块;`FRAME_MODE=active` 时仅在语音活动后注图以省 token
+- **搜索双保险**:委派的 Claude 优先用内置 WebSearch;配额/限流失败时自动降级到
+  `mcp__smart-search__web_search`(进程内 MCP 工具,包装 smart-search 技能的
+  AnySearch→Tavily→Exa 降级链,脚本位于 `~/.claude/skills/smart-search/`)
 - **委派**:Qwen 以 Function Calling(嵌套 `{"type":"function","function":{...}}` 格式)触发
   `delegate_to_claude`;hub 立即确认,随后把 Claude 的流式进度/最终总结作为 `input_text`
   项目注入会话转成语音(进度与总结自动去重,不重复播报)。Claude 跑在 `VOICE_WORKSPACE`

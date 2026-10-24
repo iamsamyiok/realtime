@@ -1,8 +1,55 @@
 import path from "node:path";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
-import { query, type Query, type SDKUserMessage, type CanUseTool } from "@anthropic-ai/claude-agent-sdk";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import {
+  query,
+  createSdkMcpServer,
+  tool,
+  type Query,
+  type SDKUserMessage,
+  type CanUseTool,
+} from "@anthropic-ai/claude-agent-sdk";
+import { z } from "zod";
 import { cfg } from "./config.js";
+
+const execFileAsync = promisify(execFile);
+const SEARCH_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", ".claude", "skills", "smart-search", "scripts", "search.mjs");
+
+/** In-process MCP server exposing the smart-search degradation chain
+ *  (AnySearch → Tavily → Exa) to the delegated Claude session, so web
+ *  search keeps working when the provider's built-in search quota is out. */
+const smartSearchServer = createSdkMcpServer({
+  name: "smart-search",
+  version: "1.0.0",
+  tools: [
+    tool(
+      "web_search",
+      "网络搜索(优雅降级链:AnySearch→Tavily→Exa)。当内置 WebSearch/WebFetch 因配额不足、限流(429)或失败时,必须改用此工具。返回带标题/URL/摘要的结果列表。",
+      {
+        query: z.string().describe("搜索关键词"),
+        num: z.number().optional().describe("结果条数,默认 5,最多 10"),
+        intl: z.boolean().optional().describe("true=国际检索(默认中文)"),
+      },
+      async ({ query: q, num, intl }) => {
+        try {
+          const args = [SEARCH_SCRIPT, q, "--num", String(num ?? 5), "--content"];
+          if (intl) args.push("--intl");
+          const { stdout } = await execFileAsync(process.execPath, args, {
+            timeout: 90_000,
+            maxBuffer: 4 * 1024 * 1024,
+            encoding: "utf8",
+          });
+          return { content: [{ type: "text", text: stdout }] };
+        } catch (e: any) {
+          const detail = (e.stdout ? String(e.stdout) + "\n" : "") + (e.message ?? e);
+          return { content: [{ type: "text", text: `搜索失败: ${String(detail).slice(0, 300)}` }] };
+        }
+      },
+    ),
+  ],
+});
 
 const SESSION_FILE = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", ".claude-session-id");
 
@@ -19,7 +66,7 @@ export type ClaudeCallbacks = {
 
 /** Bash commands safe to auto-approve in the sandbox workspace. */
 const SAFE_BASH = /^(npm (test|run|install|ci)|npx |node |python |pip |idf\.py|ls|dir|cat|type|git (status|diff|log|add|commit)|echo|mkdir|cd)\b/;
-const ALLOWED_TOOLS = new Set(["Read", "Glob", "Grep", "WebFetch", "WebSearch", "TodoWrite"]);
+const ALLOWED_TOOLS = new Set(["Read", "Glob", "Grep", "WebFetch", "WebSearch", "TodoWrite", "mcp__smart-search__web_search"]);
 
 type ActiveTask = {
   resolve: (s: string) => void;
@@ -116,6 +163,7 @@ export class ClaudeWorker {
         disallowedTools: ["ToolSearch"],
         mcpServers: {
           webcam: { type: "http", url: cfg.webcamMcp },
+          "smart-search": smartSearchServer,
         },
         settingSources: [],
         ...(resumeId ? { resume: resumeId } : {}),
@@ -214,6 +262,7 @@ export class ClaudeWorker {
       type: "text",
       text:
         `${task}\n\n[上下文] 附件是摄像头当前画面,如与本任务相关请先查看。` +
+        `需要联网搜索时优先用 WebSearch;若它因配额/限流失败,改用 mcp__smart-search__web_search 工具。` +
         `完成后请给出一段不超过三句话的中文总结(口语化,将转为语音)。`,
     });
 
