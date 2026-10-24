@@ -116,13 +116,23 @@ const injectedNorms: string[] = [];
 function normForDedup(s: string): string {
   return s.replace(/[\s\p{P}\p{S}]+/gu, "").toLowerCase().slice(0, 60);
 }
+/** Strip markdown so the spoken text never reads tables/symbols aloud. */
+function speakable(s: string): string {
+  return s
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/[|>*#`_]/g, " ")
+    .replace(/\s{2,}/g, " ")
+    .trim()
+    .slice(0, 220);
+}
 function speak(text: string, dedupe = true): void {
-  const n = normForDedup(text);
+  const spoken = speakable(text);
+  const n = normForDedup(spoken);
   if (dedupe && injectedNorms.includes(n)) return;
   injectedNorms.push(n);
   if (injectedNorms.length > 8) injectedNorms.shift();
-  qwen.sendTextItem(text);
-  qwen.requestResponse();
+  qwen.speechText(spoken);
 }
 
 const claude = new ClaudeWorker({
@@ -133,7 +143,7 @@ const claude = new ClaudeWorker({
   onDone: (summary) => {
     broadcast({ t: "agent_done", summary });
     const trimmed = summary.slice(0, 400);
-    if (normForDedup(trimmed) === injectedNorms[injectedNorms.length - 1]) {
+    if (normForDedup(speakable(trimmed)) === injectedNorms[injectedNorms.length - 1]) {
       speak("任务完成了,搞定了");
     } else {
       speak(`[任务完成] ${trimmed}`);
@@ -170,7 +180,7 @@ const qwen = new QwenSession({
       void claude
         .send(task, latest?.base64)
         .catch((e) => {
-          qwen.sendTextItem(`[任务失败] ${(e as Error).message.slice(0, 200)}`);
+          qwen.speechText(`[任务失败] ${(e as Error).message.slice(0, 200)}`);
           qwen.requestResponse();
         });
       if (wasBusy) return { status: "queued", note: "当前有任务在跑,这个已排入队列,完成后自动执行" };
@@ -350,7 +360,7 @@ wss.on("connection", (ws) => {
         } else if (/^(停|停止|取消)/.test(text)) {
           claude.interrupt();
         } else {
-          qwen.sendTextItem(text);
+          qwen.speechText(text);
           qwen.requestResponse();
         }
       } else if (msg.t === "speech") {

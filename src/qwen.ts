@@ -34,6 +34,7 @@ export class QwenSession {
   private pendingCalls = new Map<string, PendingCall>(); // by item_id
   private submittedCallIds = new Set<string>();
   private pendingRespondAfterDone = false;
+  private speechBuffer: string[] = [];
   private pingTimer: NodeJS.Timeout | null = null;
   private sessionGen = 0;
   private stageAConfirmed = false;
@@ -51,6 +52,19 @@ export class QwenSession {
     }
     this.closedByUs = false;
     this.sessionGen++;      // function outputs from older generations are stale
+    // Every new socket must run the FULL two-stage config: the tools from the
+    // previous socket do not carry over. Forgetting this reset made reconnects
+    // silently drop function calling.
+    this.stageAConfirmed = false;
+    this.audioSent = false;
+    this.lastImageAt = 0;
+    this.responding = false;
+    this.pendingCalls.clear();
+    this.pendingRespondAfterDone = false;
+    if (this.pingTimer) {
+      clearInterval(this.pingTimer);
+      this.pingTimer = null;
+    }
     this.cb.onState("connecting");
     const ws = new WebSocket(qwenWsUrl(), {
       headers: { Authorization: `Bearer ${cfg.dashscopeKey}` },
@@ -225,6 +239,18 @@ export class QwenSession {
     this.send({ type: "response.create" });
   }
 
+  /** Spoken-injection entry point: coalesces texts that arrive while a
+   *  response is active, so each done triggers at most one new response. */
+  speechText(text: string): void {
+    if (this.responding) {
+      this.speechBuffer.push(text);
+      this.pendingRespondAfterDone = true;
+      return;
+    }
+    this.sendTextItem(text);
+    this.requestResponse();
+  }
+
   /** Feed a finished tool call back (output is a plain readable string, per
    *  the official realtime FC example) and trigger the spoken summary. */
   submitFunctionOutput(callId: string, output: string): void {
@@ -342,7 +368,12 @@ export class QwenSession {
         this.pendingCalls.clear();
         if (this.pendingRespondAfterDone) {
           this.pendingRespondAfterDone = false;
-          setTimeout(() => this.requestResponse(), 150);
+          if (this.speechBuffer.length > 0) {
+            const joined = this.speechBuffer.splice(0).join(" ");
+            setTimeout(() => this.speechText(joined), 200);
+          } else {
+            setTimeout(() => this.requestResponse(), 150);
+          }
         }
         break;
       }
