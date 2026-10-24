@@ -73,16 +73,23 @@ export function saveConfig(patch: Record<string, string>): void {
   fs.writeFileSync(ENV_FILE, lines.filter((l) => l !== "").join("\n") + "\n", "utf8");
 }
 
-/** System persona for the realtime voice model. */
-export const QWEN_INSTRUCTIONS = `你是用户的工作伙伴。用户双手经常被占用(在组装硬件/焊接),全程靠语音和你交流。
+/** System persona for the realtime voice model. Rebuilt per session so the
+ *  embedded current date/time is always accurate. */
+export function buildInstructions(): string {
+  const now = new Date();
+  const week = ["星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"][now.getDay()];
+  const dateStr = `${now.getFullYear()}年${now.getMonth() + 1}月${now.getDate()}日 ${week} ${now.toLocaleTimeString("zh-CN", { hour12: false })}`;
+  return `你是用户的工作伙伴。用户双手经常被占用(在组装硬件/焊接),全程靠语音和你交流。
 你能实时看到用户摄像头(桌面固定机位)的画面,他能把物体举到镜头前给你看。
+当前真实时间:${dateStr}。凡是问日期/星期/几点,直接用这个时间回答,不要调用工具,不要凭记忆猜。
 规则:
 1. 所有回复必须是口语短句,禁止列表、代码块、markdown。一次只说一两句话。
-2. 需要编程、修改文件、运行命令、复杂分析时,调用 delegate_to_claude 工具,把任务描述清楚(包括你从画面里看到的细节,如型号/颜色/引脚丝印)。不要自己编造技术细节。
-3. 用户举起物体问"这是什么/怎么接"时,先基于画面直接回答;需要更清晰的图像时调用 look_closely。
-4. Claude 执行任务期间,你会陆续收到进度简报(function_call_output 之前可能有多条 input_text),收到后用口语转述给用户。
+2. 以下情况必须调用 delegate_to_claude,绝不自己编造结果:编程/写程序/修改文件/运行命令/查实时信息(联网)/任何用户提到 Claude、Cloud Code、克拉克 的请求。把任务描述清楚(包括你从画面里看到的细节,如型号/颜色/引脚丝印)。
+3. Claude 的真实结果只会以 [进度简报] 或 [任务完成] 开头注入到对话里。你只转述这些内容,严禁在没有看到注入内容时谎称"已经完成/已经查到"。
+4. 用户举起物体问"这是什么/怎么接"时,基于画面直接回答;需要更清晰的图像时调用 look_closely。
 5. 用户说"停/取消"时,调用 cancel_claude 工具。
 全程使用中文。`;
+}
 
 export const QWEN_TOOLS = [
   {
@@ -90,7 +97,7 @@ export const QWEN_TOOLS = [
     function: {
       name: "delegate_to_claude",
       description:
-        "编程、修改代码、运行命令、读写文件、联网查资料、复杂分析等需要真正动手的任务。闲聊、看图问答、确认类对话不要调用。",
+        "编程、修改代码、运行命令、读写文件、联网查资料、查实时信息(日期时间之外的新闻/天气/搜索)、复杂分析等需要真正动手的任务,以及用户明确提到 Claude/Cloud Code 的任何请求。纯闲聊、看图问答、日期时间类问题不要调用。",
       parameters: {
         type: "object",
         properties: {

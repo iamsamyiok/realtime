@@ -1,6 +1,10 @@
 import path from "node:path";
+import fs from "node:fs";
+import { fileURLToPath } from "node:url";
 import { query, type Query, type SDKUserMessage, type CanUseTool } from "@anthropic-ai/claude-agent-sdk";
 import { cfg } from "./config.js";
+
+const SESSION_FILE = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", ".claude-session-id");
 
 export type ClaudeCallbacks = {
   /** short progress lines while the agent works (already throttled) */
@@ -42,7 +46,10 @@ export class ClaudeWorker {
     if (ALLOWED_TOOLS.has(toolName)) return { behavior: "allow", updatedInput: input };
     if (toolName === "Write" || toolName === "Edit" || toolName === "NotebookEdit") {
       const p = String((input as any).file_path ?? (input as any).notebook_path ?? (input as any).path ?? "");
-      const inside = path.resolve(p).toLowerCase().startsWith(path.resolve(cfg.claudeWorkspace).toLowerCase());
+      // The SDK spawns the CLI with cwd = workspace, so relative paths are
+      // relative to the workspace — resolve against it, not the hub process.
+      const resolved = path.isAbsolute(p) ? path.resolve(p) : path.resolve(cfg.claudeWorkspace, p);
+      const inside = resolved.toLowerCase().startsWith(path.resolve(cfg.claudeWorkspace).toLowerCase());
       if (inside) return { behavior: "allow", updatedInput: input };
       const msg = `只能写入沙箱工作区(${cfg.claudeWorkspace})内的文件,已拒绝: ${p}`;
       console.warn("[claude] denied path:", p);
@@ -68,18 +75,32 @@ export class ClaudeWorker {
   }
 
   private startSession(): void {
-    console.log("[claude] starting Agent SDK session, cwd =", cfg.claudeWorkspace);
+    // Persist the session id so hub restarts resume the same conversation
+    // ("开启一次,持续挂后台,不忘记历史").
+    let resumeId: string | undefined;
+    try {
+      if (fs.existsSync(SESSION_FILE)) {
+        resumeId = fs.readFileSync(SESSION_FILE, "utf8").trim() || undefined;
+      }
+    } catch {}
+    console.log("[claude] starting Agent SDK session, cwd =", cfg.claudeWorkspace,
+                resumeId ? `(resuming ${resumeId.slice(0, 8)}...)` : "(fresh)");
     const q = query({
       prompt: this.inputStream(),
       options: {
         cwd: cfg.claudeWorkspace,
         permissionMode: "acceptEdits",
         canUseTool: this.canUseTool,
-        allowedTools: ["Read", "Write", "Edit", "Glob", "Grep", "WebFetch", "WebSearch", "Bash", "TodoWrite"],
+        allowedTools: ["Read", "Write", "Edit", "Glob", "Grep", "WebFetch", "WebSearch", "Bash", "TodoWrite", "NotebookEdit"],
+        // Tool search defers Bash/Write/etc. behind a search tool, which made
+        // the model conclude it "has no file tools". Disable the searcher so
+        // the full toolset stays in-context.
+        disallowedTools: ["ToolSearch"],
         mcpServers: {
           webcam: { type: "http", url: cfg.webcamMcp },
         },
         settingSources: [],
+        ...(resumeId ? { resume: resumeId } : {}),
       },
     });
     this.queryHandle = q;
@@ -87,6 +108,10 @@ export class ClaudeWorker {
     void (async () => {
       try {
         for await (const msg of q) {
+          const sid = (msg as any).session_id;
+          if (sid) {
+            try { fs.writeFileSync(SESSION_FILE, String(sid), "utf8"); } catch {}
+          }
           if (msg.type === "assistant") {
             const blocks: any[] = (msg.message as any)?.content ?? [];
             const text = blocks
@@ -166,5 +191,17 @@ export class ClaudeWorker {
       console.log("[claude] interrupt requested");
       void this.queryHandle.interrupt();
     }
+  }
+
+  /** Forget history: clear the persisted session id; the next task starts fresh. */
+  resetSession(): void {
+    try { fs.unlinkSync(SESSION_FILE); } catch {}
+    if (this.queryHandle) {
+      try { this.queryHandle.close(); } catch {}
+      this.queryHandle = null;
+    }
+    this.busy = false;
+    this.cb.onBusy(false);
+    console.log("[claude] session reset - next task starts fresh");
   }
 }

@@ -1,6 +1,7 @@
 // Sanity check for the Claude leg: Agent SDK streaming session round-trip.
 import dotenv from "dotenv";
-dotenv.config({ path: new URL("../.env", import.meta.url).pathname });
+import { fileURLToPath } from "node:url";
+dotenv.config({ path: fileURLToPath(new URL("../.env", import.meta.url)) });
 
 import { query } from "@anthropic-ai/claude-agent-sdk";
 

@@ -1,4 +1,6 @@
-# VoiceBridge 🎙️
+# Realtime 🎙️
+
+> 语音 + 摄像头 + Claude Code。开启一次,Claude 会话持续挂在后台 —— hub 重启也不丢历史(session resume)。
 
 **语音 × Claude Code × 摄像头** — 把 Qwen-Omni-Realtime 的实时语音/视觉能力和 Claude Code 的编码能力缝在一起:你对麦克风说话、把物体举到摄像头前,Qwen 实时听/看/答;需要真正动手(写代码、跑命令、查资料)时,它自动把任务委派给 Claude Code,进度和结果再转成语音播报给你。全程双手自由。
 
@@ -69,8 +71,10 @@ if (voiceHub && image) {
   Claude 收原生分辨率作为消息图像块;`FRAME_MODE=active` 时仅在语音活动后注图以省 token
 - **委派**:Qwen 以 Function Calling(嵌套 `{"type":"function","function":{...}}` 格式)触发
   `delegate_to_claude`;hub 立即确认,随后把 Claude 的流式进度/最终总结作为 `input_text`
-  项目注入会话转成语音。Claude 跑在 `VOICE_WORKSPACE` 沙箱,Write/Edit 限制在目录内,
-  Bash 走白名单正则,其余操作拒绝并语音提示
+  项目注入会话转成语音(进度与总结自动去重,不重复播报)。Claude 跑在 `VOICE_WORKSPACE`
+  沙箱,Write/Edit 限制在目录内,Bash 走白名单正则,其余操作拒绝并语音提示
+- **会话持久化**:Claude 的 session id 落盘(`.claude-session-id`),hub 重启后自动
+  `resume` 同一会话 —— 跨重启不忘记历史。`POST /api/reset-claude` 可主动清空
 - **计费注意**:realtime 多轮会话的上下文(含历史帧)会在每个响应重复计费,默认 active 档
 
 ## 安全

@@ -1,5 +1,5 @@
 import WebSocket from "ws";
-import { cfg, qwenWsUrl, QWEN_INSTRUCTIONS, QWEN_TOOLS } from "./config.js";
+import { cfg, qwenWsUrl, buildInstructions, QWEN_TOOLS } from "./config.js";
 
 export type QwenCallbacks = {
   /** base64 PCM 24kHz chunk to play on the browser */
@@ -34,6 +34,8 @@ export class QwenSession {
   private pendingCalls = new Map<string, PendingCall>(); // by item_id
   private submittedCallIds = new Set<string>();
   private pendingRespondAfterDone = false;
+  private pingTimer: NodeJS.Timeout | null = null;
+  private sessionGen = 0;
   private stageAConfirmed = false;
 
   constructor(private cb: QwenCallbacks) {}
@@ -48,6 +50,7 @@ export class QwenSession {
       return;
     }
     this.closedByUs = false;
+    this.sessionGen++;      // function outputs from older generations are stale
     this.cb.onState("connecting");
     const ws = new WebSocket(qwenWsUrl(), {
       headers: { Authorization: `Bearer ${cfg.dashscopeKey}` },
@@ -80,6 +83,15 @@ export class QwenSession {
         console.log("[qwen] reconnecting in 3s...");
         setTimeout(() => !this.closedByUs && this.connect(), 3000);
       }
+    });
+
+    // Keepalive: prevents idle-timeout 1006 drops mid-conversation
+    this.pingTimer = setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) ws.ping();
+    }, 30_000);
+    ws.on("close", () => {
+      if (this.pingTimer) clearInterval(this.pingTimer);
+      this.pingTimer = null;
     });
   }
 
@@ -127,9 +139,9 @@ export class QwenSession {
       output: { voice, format: { type: "pcm", sample_rate: 24000 } },
     };
     return [
-      { modalities: ["text", "audio"], turn_detection: { type: "semantic_vad" }, instructions: QWEN_INSTRUCTIONS, audio },
-      { modalities: ["text", "audio"], turn_detection: "semantic_vad", instructions: QWEN_INSTRUCTIONS, audio },
-      { modalities: ["text", "audio"], turn_detection: null, instructions: QWEN_INSTRUCTIONS, audio },
+      { modalities: ["text", "audio"], turn_detection: { type: "semantic_vad" }, instructions: buildInstructions(), audio },
+      { modalities: ["text", "audio"], turn_detection: "semantic_vad", instructions: buildInstructions(), audio },
+      { modalities: ["text", "audio"], turn_detection: null, instructions: buildInstructions(), audio },
     ];
   }
 
@@ -175,7 +187,9 @@ export class QwenSession {
   maybeSendImage(jpeg: Buffer): "sent" | "skipped-size" | "skipped-rate" | "skipped-off" {
     if (!this.connected) return "skipped-off";
     const now = Date.now();
-    if (this.audioSent && now - this.lastAudioAt > 30_000) {
+    // Server requires audio before images and resets that state when idle:
+    // warm up with silence if we never sent audio or have been quiet a while.
+    if (!this.audioSent || now - this.lastAudioAt > 30_000) {
       this.send({
         type: "input_audio_buffer.append",
         audio: Buffer.alloc(3200).toString("base64"), // 100ms silence @16k s16le
@@ -183,7 +197,6 @@ export class QwenSession {
       this.lastAudioAt = now;
       this.audioSent = true;
     }
-    if (!this.audioSent) return "skipped-off";
     if (now - this.lastImageAt < 1000) return "skipped-rate";
     if (jpeg.length > cfg.qwenImageMaxBytes) return "skipped-size";
     this.lastImageAt = now;
@@ -336,6 +349,11 @@ export class QwenSession {
 
       case "error":
         console.error("[qwen] error event:", JSON.stringify(ev.error ?? ev).slice(0, 300));
+        if (/Unknown function call id|rejected function_call_output/i.test(JSON.stringify(ev.error ?? ev))) {
+          // Stale call_id from a previous session generation - already handled
+          // by the text-injection fallback; never treat as fatal.
+          break;
+        }
         if (/append image before append audio/i.test(JSON.stringify(ev.error ?? ev))) {
           console.warn("[qwen] server reset audio state - will warm up with silence before next image");
           this.audioSent = false;
@@ -368,17 +386,33 @@ export class QwenSession {
     } catch {
       /* tolerate empty/partial arguments */
     }
+    const gen = this.sessionGen;
     try {
       const output = await this.cb.onFunctionCall(p.name, JSON.stringify(args), p.callId);
-      const text =
+      let text =
         typeof output === "string"
           ? output
           : Object.entries(output as Record<string, unknown>)
               .map(([k, v]) => `${k}: ${typeof v === "string" ? v : JSON.stringify(v)}`)
               .join("; ");
-      this.submitFunctionOutput(p.callId, text || "完成");
+      text = text || "完成";
+      if (gen !== this.sessionGen) {
+        // The WS session dropped while the task ran: the old call_id no longer
+        // exists server-side. Inject the result as plain text instead.
+        console.log("[qwen] session regenerated - injecting tool result as text");
+        this.sendTextItem(`[工具结果] ${text}`);
+        this.requestResponse();
+        return;
+      }
+      this.submitFunctionOutput(p.callId, text);
     } catch (e) {
-      this.submitFunctionOutput(p.callId, `执行失败: ${(e as Error).message}`);
+      const msg = `执行失败: ${(e as Error).message}`;
+      if (gen !== this.sessionGen) {
+        this.sendTextItem(`[工具结果] ${msg}`);
+        this.requestResponse();
+      } else {
+        this.submitFunctionOutput(p.callId, msg);
+      }
     }
   }
 }

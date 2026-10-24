@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>VoiceBridge — 语音 × Claude × 摄像头</title>
+<title>Realtime — 语音 × Claude × 摄像头</title>
 <style>
   :root {
     --bg: #f4f6fb; --card: #ffffff; --ink: #1e293b; --sub: #64748b;
@@ -66,7 +66,7 @@
   <header>
     <div class="logo">🎙</div>
     <div>
-      <h1>VoiceBridge</h1>
+      <h1>Realtime</h1>
       <div class="sub">Qwen 实时语音 × Claude Code × 摄像头</div>
     </div>
     <div class="chips">
@@ -306,13 +306,13 @@ setInterval(() => {
   $('frame-age').textContent = age === null ? '无帧' : (age + 's 前');
 }, 1000);
 
-// status refresh
+// status refresh — always re-syncs the qwen pill (never gets stuck)
 setInterval(async () => {
   try {
     const s = await (await fetch('/api/status')).json();
     pill('p-frame', `frames ${s.framesReceived}/${s.framesInjected}`, s.framesReceived ? 'ok' : '');
     if (!s.qwenConfigured) pill('p-qwen', 'qwen 未配置 key', 'bad');
-    else if (!qwenPillTouched) pill('p-qwen', s.qwenConnected ? 'qwen ✓' : 'qwen 未连接', s.qwenConnected ? 'ok' : 'warn');
+    else pill('p-qwen', s.qwenConnected ? 'qwen ✓' : 'qwen 重连中', s.qwenConnected ? 'ok' : 'warn');
   } catch {}
 }, 3000);
 

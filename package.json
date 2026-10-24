@@ -1,9 +1,9 @@
 {
-  "name": "voice-hub",
-  "version": "0.1.0",
+  "name": "realtime",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "Voice gateway bridging Qwen-Omni-Realtime (speech+vision) with Claude Code (Agent SDK) and the mcp-webcam camera pipeline",
+  "description": "Realtime — voice+vision gateway bridging Qwen-Omni-Realtime with Claude Code (Agent SDK) and the mcp-webcam camera pipeline",
   "engines": { "node": ">=20" },
   "scripts": {
     "build": "tsc",

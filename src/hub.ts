@@ -86,10 +86,11 @@ async function ingestFrame(b64OrDataUrl: string, mime = "image/jpeg"): Promise<v
 
   broadcast({ t: "frame", thumb: smallBase64Url(frameStore.small) });
 
-  // Push to Qwen per policy
+  // Push to Qwen per policy: near speech activity, always-mode, or while a
+  // Claude task is running (so the agent can watch on-screen progress).
   if (cfg.frameMode !== "off" && frameStore.small) {
     const speechRecent = Date.now() - lastSpeechActivity < cfg.speechWindowMs;
-    if (cfg.frameMode === "always" || speechRecent) {
+    if (cfg.frameMode === "always" || speechRecent || claude.isBusy) {
       const r = qwen.maybeSendImage(Buffer.from(frameStore.small.base64, "base64"));
       if (r === "sent") framesInjected++;
     }
@@ -109,16 +110,34 @@ function broadcast(msg: FrontMsg): void {
   for (const ws of frontSockets) if (ws.readyState === WebSocket.OPEN) ws.send(s);
 }
 
+// De-duplication for spoken injections: Claude's last progress line often
+// equals its final summary - never speak the same content twice.
+const injectedNorms: string[] = [];
+function normForDedup(s: string): string {
+  return s.replace(/[\s\p{P}\p{S}]+/gu, "").toLowerCase().slice(0, 60);
+}
+function speak(text: string, dedupe = true): void {
+  const n = normForDedup(text);
+  if (dedupe && injectedNorms.includes(n)) return;
+  injectedNorms.push(n);
+  if (injectedNorms.length > 8) injectedNorms.shift();
+  qwen.sendTextItem(text);
+  qwen.requestResponse();
+}
+
 const claude = new ClaudeWorker({
   onProgress: (line) => {
     broadcast({ t: "progress", line });
-    qwen.sendTextItem(`[进度简报] ${line}`);
-    qwen.requestResponse();
+    speak(`[进度简报] ${line}`);
   },
   onDone: (summary) => {
     broadcast({ t: "agent_done", summary });
-    qwen.sendTextItem(`[任务完成] ${summary.slice(0, 400)}`);
-    qwen.requestResponse();
+    const trimmed = summary.slice(0, 400);
+    if (normForDedup(trimmed) === injectedNorms[injectedNorms.length - 1]) {
+      speak("任务完成了,搞定了");
+    } else {
+      speak(`[任务完成] ${trimmed}`);
+    }
   },
   onError: (message) => broadcast({ t: "error", message }),
   onBusy: (busy) => broadcast({ t: "busy", busy }),
@@ -199,6 +218,12 @@ app.post("/api/test-frame", async (_req, res) => {
     nativeBytes: frameStore.native ? Math.floor((frameStore.native.base64.length * 3) / 4) : 0,
     smallBytes: frameStore.small ? Math.floor((frameStore.small.base64.length * 3) / 4) : 0,
   });
+});
+
+// Forget Claude history (next delegated task starts a fresh session)
+app.post("/api/reset-claude", (_req, res) => {
+  claude.resetSession();
+  res.json({ ok: true });
 });
 
 // ---------- settings ----------
@@ -329,11 +354,11 @@ wss.on("connection", (ws) => {
   ws.on("close", () => frontSockets.delete(ws));
 });
 
-// ambient frame poller
+// ambient frame poller — also runs while Claude works, so the agent can
+// watch on-screen progress (capture is a sync canvas grab; race window is tiny)
 setInterval(() => {
   if (cfg.frameMode === "off") return;
   if (!qwen.connected && cfg.frameMode === "active") return;
-  if (claude.isBusy) return; // avoid competing with Claude's own captures
   void captureOnce();
 }, cfg.frameIntervalMs);
 

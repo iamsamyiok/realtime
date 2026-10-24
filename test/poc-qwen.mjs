@@ -2,7 +2,8 @@
 // Verifies: connect -> session.created -> session.update accepted ->
 // audio append accepted -> image buffer accepts a frame -> FC tools config ok.
 import dotenv from "dotenv";
-dotenv.config({ path: new URL("../.env", import.meta.url).pathname });
+import { fileURLToPath } from "node:url";
+dotenv.config({ path: fileURLToPath(new URL("../.env", import.meta.url)) });
 
 import WebSocket from "ws";
 
@@ -33,7 +34,7 @@ ws.on("message", (d) => {
       type: "session.update",
       session: {
         modalities: ["text", "audio"],
-        turn_detection: "semantic_vad",
+        turn_detection: { type: "semantic_vad" },
         instructions: "测试会话",
         audio: {
           input: { format: { type: "pcm", sample_rate: 16000, sample_format: "s16le", channels: 1, packing: "interleaved", channel_layout: "mono" } },
