@@ -139,6 +139,10 @@ const claude = new ClaudeWorker({
       speak(`[任务完成] ${trimmed}`);
     }
   },
+  onCancelled: (reason) => {
+    broadcast({ t: "agent_cancelled", reason });
+    speak(`[任务取消] ${reason},有需要随时再喊我`);
+  },
   onError: (message) => broadcast({ t: "error", message }),
   onBusy: (busy) => broadcast({ t: "busy", busy }),
 });
@@ -149,24 +153,27 @@ const qwen = new QwenSession({
   onTranscript: (who, text, final) => broadcast({ t: "transcript", who, text, final }),
   onState: (state, detail) => {
     console.log(`[qwen] state=${state} ${detail ?? ""}`);
+    if (state === "ready") qwenStartedAt = Date.now();
     broadcast({ t: "qwen_state", state, detail });
   },
   onSpeechActivity: (speaking) => {
     if (speaking) lastSpeechActivity = Date.now();
-  },
-  onFunctionCall: async (name, argsJson, _callId) => {
+  },  onFunctionCall: async (name, argsJson, _callId) => {
     if (name === "delegate_to_claude") {
-      let task = String((JSON.parse(argsJson) as any).task ?? "");
+      const parsed = JSON.parse(argsJson) as { task?: string; priority?: string };
+      const task = String(parsed.task ?? "");
       if (!task) return { note: "任务描述为空" };
       // Delegation is long-running: acknowledge immediately, stream progress
       // via text items; the final summary is injected by onDone.
       const latest = frameStore.native;
+      const wasBusy = claude.isBusy;
       void claude
         .send(task, latest?.base64)
         .catch((e) => {
           qwen.sendTextItem(`[任务失败] ${(e as Error).message.slice(0, 200)}`);
           qwen.requestResponse();
         });
+      if (wasBusy) return { status: "queued", note: "当前有任务在跑,这个已排入队列,完成后自动执行" };
       return { status: "accepted", note: "任务已交给 Claude 执行,进度将陆续播报" };
     }
     if (name === "look_closely") {
@@ -201,10 +208,12 @@ app.get("/api/status", (_req, res) => {
     qwenConfigured: !!cfg.dashscopeKey,
     qwenConnected: qwen.connected,
     claudeBusy: claude.isBusy,
+    claudeQueued: claude.queueLength,
     framesReceived,
     framesInjected,
     frameMode: cfg.frameMode,
     hasLatestFrame: !!frameStore.native,
+    cameraLive: !!frameStore.native && Date.now() - frameStore.native.ts < 20_000,
     workspace: cfg.claudeWorkspace,
   });
 });
@@ -361,6 +370,23 @@ setInterval(() => {
   if (!qwen.connected && cfg.frameMode === "active") return;
   void captureOnce();
 }, cfg.frameIntervalMs);
+
+// Qwen session recycler: realtime billing re-processes the whole context
+// every turn, so a session that lives for hours gets expensive. When the
+// user has been idle and nothing is running, quietly start a fresh session.
+let qwenStartedAt = Date.now();
+setInterval(() => {
+  if (cfg.sessionRecycleMin <= 0) return;
+  if (!qwen.connected) return;
+  if (claude.isBusy) return;
+  if (Date.now() - lastSpeechActivity < cfg.speechWindowMs) return;
+  const ageMs = Date.now() - qwenStartedAt;
+  if (ageMs > cfg.sessionRecycleMin * 60_000) {
+    console.log(`[qwen] recycling session (age ${Math.round(ageMs / 60000)}min) to bound context cost`);
+    qwenStartedAt = Date.now();
+    qwen.reconnect();
+  }
+}, 60_000);
 
 // graceful shutdown
 for (const sig of ["SIGINT", "SIGTERM"] as const) {

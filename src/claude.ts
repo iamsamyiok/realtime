@@ -9,8 +9,10 @@ const SESSION_FILE = path.join(path.dirname(fileURLToPath(import.meta.url)), "..
 export type ClaudeCallbacks = {
   /** short progress lines while the agent works (already throttled) */
   onProgress: (line: string) => void;
-  /** final answer text when the turn completes */
+  /** final answer text when the turn completes (suppressed if cancelled) */
   onDone: (summary: string) => void;
+  /** the task was cancelled by the user or timed out */
+  onCancelled: (reason: string) => void;
   onError: (message: string) => void;
   onBusy: (busy: boolean) => void;
 };
@@ -19,27 +21,43 @@ export type ClaudeCallbacks = {
 const SAFE_BASH = /^(npm (test|run|install|ci)|npx |node |python |pip |idf\.py|ls|dir|cat|type|git (status|diff|log|add|commit)|echo|mkdir|cd)\b/;
 const ALLOWED_TOOLS = new Set(["Read", "Glob", "Grep", "WebFetch", "WebSearch", "TodoWrite"]);
 
+type ActiveTask = {
+  resolve: (s: string) => void;
+  reject: (e: Error) => void;
+  cancelled: boolean;
+  timedOut: boolean;
+  timeout: NodeJS.Timeout | null;
+};
+
+type QueuedTask = { msg: SDKUserMessage; resolve: (s: string) => void; reject: (e: Error) => void };
+
 /**
  * A long-lived Claude Code session driven through the Agent SDK's
  * streaming-input mode (query() with an AsyncIterable prompt).
- * Verified against @anthropic-ai/claude-agent-sdk 0.3.309 type defs:
- *  - SDKUserMessage.message is a full MessageParam: content may be a string
- *    or content-block array (text, image, ...)  -> images attached directly.
- *  - Options.canUseTool / permissionMode / mcpServers http-type supported.
- *  - Query.interrupt(): Promise<...> exists.
+ *
+ * Maturity features:
+ *  - task queue (serialize; callers may enqueue while busy)
+ *  - per-task timeout (auto-interrupt + spoken "timed out")
+ *  - user cancellation ("停") suppresses the final-result speech
+ *  - session id persisted; hub restarts resume the same conversation
  */
 export class ClaudeWorker {
   private queryHandle: Query | null = null;
-  private queue: SDKUserMessage[] = [];
+  private streamQueue: SDKUserMessage[] = [];
   private queueWake: (() => void) | null = null;
-  private busy = false;
+  private waiting: QueuedTask[] = [];
+  private active: ActiveTask | null = null;
   private pending: { resolve: (s: string) => void; reject: (e: Error) => void } | null = null;
   private lastProgressAt = 0;
 
   constructor(private cb: ClaudeCallbacks) {}
 
   get isBusy(): boolean {
-    return this.busy;
+    return this.active !== null;
+  }
+
+  get queueLength(): number {
+    return this.waiting.length;
   }
 
   private canUseTool: CanUseTool = async (toolName, input) => {
@@ -65,11 +83,11 @@ export class ClaudeWorker {
 
   private async *inputStream(): AsyncIterable<SDKUserMessage> {
     while (true) {
-      if (this.queue.length === 0) {
+      if (this.streamQueue.length === 0) {
         await new Promise<void>((r) => (this.queueWake = r));
         this.queueWake = null;
       }
-      const msg = this.queue.shift();
+      const msg = this.streamQueue.shift();
       if (msg) yield msg;
     }
   }
@@ -122,26 +140,54 @@ export class ClaudeWorker {
             if (text) this.emitProgress(text);
           } else if (msg.type === "result") {
             const summary = String((msg as any).result ?? "").trim();
-            if (this.pending) {
-              this.pending.resolve(summary);
-              this.pending = null;
-            }
-            this.busy = false;
-            this.cb.onBusy(false);
-            this.cb.onDone(summary || "(任务完成,无文本输出)");
+            this.finishActive(summary);
           }
         }
       } catch (e) {
         console.error("[claude] stream error:", (e as Error).message);
         this.cb.onError((e as Error).message);
-        if (this.pending) {
-          this.pending.reject(e as Error);
-          this.pending = null;
-        }
-        this.busy = false;
-        this.cb.onBusy(false);
+        this.failActive(new Error((e as Error).message));
       }
     })();
+  }
+
+  /** Resolve the active task, speak the outcome, then drain the queue. */
+  private finishActive(summary: string): void {
+    const task = this.active;
+    this.active = null;
+    if (this.pending) {
+      this.pending.resolve(summary);
+      this.pending = null;
+    }
+    if (task) {
+      if (task.timeout) clearTimeout(task.timeout);
+      if (task.cancelled) this.cb.onCancelled("用户取消");
+      else if (task.timedOut) this.cb.onCancelled("任务超时,已自动停止");
+      else this.cb.onDone(summary || "(任务完成,无文本输出)");
+    }
+    this.busyGuard();
+  }
+
+  private failActive(e: Error): void {
+    const task = this.active;
+    this.active = null;
+    if (this.pending) {
+      this.pending.reject(e);
+      this.pending = null;
+    }
+    if (task?.timeout) clearTimeout(task.timeout);
+    this.busyGuard();
+  }
+
+  /** Start the next queued task if any (keeps busy flag correct). */
+  private busyGuard(): void {
+    if (this.waiting.length > 0) {
+      const next = this.waiting.shift()!;
+      this.cb.onBusy(true);
+      this.activate(next.msg, next.resolve, next.reject);
+    } else {
+      this.cb.onBusy(false);
+    }
   }
 
   private emitProgress(text: string): void {
@@ -152,7 +198,8 @@ export class ClaudeWorker {
     this.cb.onProgress(line);
   }
 
-  /** Send a delegated task; resolves with Claude's final summary. */
+  /** Send a delegated task; resolves with Claude's final summary.
+   *  If a task is already running, the new one is queued (FIFO, capped). */
   send(task: string, imageBase64?: string): Promise<string> {
     if (!this.queryHandle) this.startSession();
 
@@ -176,19 +223,43 @@ export class ClaudeWorker {
       parent_tool_use_id: null,
     };
 
-    const p = new Promise<string>((resolve, reject) => (this.pending = { resolve, reject }));
-    if (this.busy) throw new Error("Claude 正忙,请稍后或使用 queue");
-    this.busy = true;
-    this.cb.onBusy(true);
-    this.lastProgressAt = 0;
-    this.queue.push(msg);
-    this.queueWake?.();
-    return p;
+    if (this.active) {
+      if (this.waiting.length >= 3) {
+        return Promise.reject(new Error("任务队列已满(3 个),请等当前任务完成"));
+      }
+      console.log(`[claude] queued task (${this.waiting.length + 1} waiting)`);
+      return new Promise<string>((resolve, reject) => this.waiting.push({ msg, resolve, reject }));
+    }
+
+    return new Promise<string>((resolve, reject) => this.activate(msg, resolve, reject));
   }
 
-  interrupt(): void {
-    if (this.queryHandle && this.busy) {
-      console.log("[claude] interrupt requested");
+  private activate(msg: SDKUserMessage, resolve: (s: string) => void, reject: (e: Error) => void): void {
+    this.cb.onBusy(true);
+    this.lastProgressAt = 0;
+    const task: ActiveTask = {
+      resolve, reject, cancelled: false, timedOut: false,
+      timeout: cfg.taskTimeoutMs > 0
+        ? setTimeout(() => {
+            if (this.active) {
+              console.warn("[claude] task timeout - interrupting");
+              task.timedOut = true;
+              this.interrupt();
+            }
+          }, cfg.taskTimeoutMs)
+        : null,
+    };
+    this.active = task;
+    this.pending = { resolve, reject };
+    this.streamQueue.push(msg);
+    this.queueWake?.();
+  }
+
+  /** User said "停" or a timeout fired: interrupt and mark cancelled. */
+  interrupt(reason = "用户取消"): void {
+    if (this.queryHandle && this.active) {
+      console.log("[claude] interrupt requested:", reason);
+      this.active.cancelled = true;
       void this.queryHandle.interrupt();
     }
   }
@@ -200,7 +271,12 @@ export class ClaudeWorker {
       try { this.queryHandle.close(); } catch {}
       this.queryHandle = null;
     }
-    this.busy = false;
+    for (const t of this.waiting) t.reject(new Error("会话已重置"));
+    this.waiting = [];
+    if (this.active) {
+      this.active.reject(new Error("会话已重置"));
+      this.active = null;
+    }
     this.cb.onBusy(false);
     console.log("[claude] session reset - next task starts fresh");
   }

@@ -310,9 +310,11 @@ setInterval(() => {
 setInterval(async () => {
   try {
     const s = await (await fetch('/api/status')).json();
-    pill('p-frame', `frames ${s.framesReceived}/${s.framesInjected}`, s.framesReceived ? 'ok' : '');
+    if (!s.cameraLive) pill('p-frame', '相机未连接(打开 3333 页)', 'bad');
+    else pill('p-frame', `frames ${s.framesReceived}/${s.framesInjected}`, 'ok');
     if (!s.qwenConfigured) pill('p-qwen', 'qwen 未配置 key', 'bad');
     else pill('p-qwen', s.qwenConnected ? 'qwen ✓' : 'qwen 重连中', s.qwenConnected ? 'ok' : 'warn');
+    if (s.claudeQueued > 0) pill('p-claude', `claude 执行中 +${s.claudeQueued} 排队`, 'warn');
   } catch {}
 }, 3000);
 

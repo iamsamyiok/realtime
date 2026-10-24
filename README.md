@@ -73,6 +73,10 @@ if (voiceHub && image) {
   `delegate_to_claude`;hub 立即确认,随后把 Claude 的流式进度/最终总结作为 `input_text`
   项目注入会话转成语音(进度与总结自动去重,不重复播报)。Claude 跑在 `VOICE_WORKSPACE`
   沙箱,Write/Edit 限制在目录内,Bash 走白名单正则,其余操作拒绝并语音提示
+- **任务队列与超时**:Claude 忙时新任务自动排队(上限 3 个,语音提示);
+  单任务默认 10 分钟超时自动打断(`TASK_TIMEOUT_MS` 可调);说"停"立即取消且不再复述结果
+- **Qwen 会话回收**:realtime 上下文每轮全量重复计费,空闲 45 分钟(`SESSION_RECYCLE_MIN`)
+  自动换新会话控制成本;相机页意外关闭时语音页状态芯片会显示"相机未连接"
 - **会话持久化**:Claude 的 session id 落盘(`.claude-session-id`),hub 重启后自动
   `resume` 同一会话 —— 跨重启不忘记历史。`POST /api/reset-claude` 可主动清空
 - **计费注意**:realtime 多轮会话的上下文(含历史帧)会在每个响应重复计费,默认 active 档

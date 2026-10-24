@@ -37,6 +37,12 @@ export const cfg = {
   // Speech-activity window (ms): a frame may be pushed to Qwen within this
   // window after the last detected speech activity in "active" mode.
   speechWindowMs: num(process.env.SPEECH_WINDOW_MS, 10_000),
+
+  // Claude task safety: hard timeout per delegated task (0 = unlimited)
+  taskTimeoutMs: num(process.env.TASK_TIMEOUT_MS, 600_000),
+  // Recycle the Qwen session after this many minutes when idle
+  // (context re-billing grows every turn; 0 = never recycle)
+  sessionRecycleMin: num(process.env.SESSION_RECYCLE_MIN, 45),
 };
 
 export function qwenWsUrl(): string {
@@ -49,6 +55,7 @@ export function saveConfig(patch: Record<string, string>): void {
   const KEY_ALLOWED = new Set([
     "DASHSCOPE_API_KEY", "DASHSCOPE_WORKSPACE_ID", "QWEN_MODEL", "QWEN_VOICE",
     "QWEN_REGION", "FRAME_MODE", "FRAME_INTERVAL_MS", "HUB_PORT", "VOICE_WORKSPACE",
+    "TASK_TIMEOUT_MS", "SESSION_RECYCLE_MIN",
   ]);
   const lines = fs.existsSync(ENV_FILE) ? fs.readFileSync(ENV_FILE, "utf8").split(/\r?\n/) : [];
   for (const [k, v] of Object.entries(patch)) {
